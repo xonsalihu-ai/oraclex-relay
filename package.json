@@ -1,0 +1,30 @@
+{
+  "name": "oraclex-relay",
+  "version": "1.0.0",
+  "description": "OracleX Trading Relay Server - Connects Python to Dashboard",
+  "main": "oraclex_relay_enhanced.js",
+  "scripts": {
+    "start": "node oraclex_relay_enhanced.js",
+    "dev": "nodemon oraclex_relay_enhanced.js"
+  },
+  "engines": {
+    "node": "18.x"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "body-parser": "^1.20.2",
+    "dotenv": "^16.0.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "keywords": [
+    "trading",
+    "relay",
+    "oraclex",
+    "algorithmic"
+  ],
+  "author": "Egzon",
+  "license": "MIT"
+}
