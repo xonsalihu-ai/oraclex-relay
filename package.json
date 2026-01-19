@@ -4,8 +4,8 @@
   "description": "OracleX Trading Relay Server - Connects Python to Dashboard",
   "main": "oraclex_relay_enhanced.js",
   "scripts": {
-    "start": "node oraclex_relay_enhanced.js",
-    "dev": "nodemon oraclex_relay_enhanced.js"
+    "start": "node oraclex_relay_v3_railway_fixed.js",
+    "dev": "nodemon oraclex_relay_v3_railway_fixed.js"
   },
   "engines": {
     "node": "18.x"
