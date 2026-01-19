@@ -1,0 +1,18 @@
+{
+  "name": "oraclex-relay",
+  "version": "2.0.0",
+  "description": "OracleX Trading Relay Server",
+  "main": "oraclex_relay_v2_updated.js",
+  "scripts": {
+    "start": "node oraclex_relay_v2_updated.js",
+    "dev": "node oraclex_relay_v2_updated.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "body-parser": "^1.20.2"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
