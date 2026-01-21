@@ -1,14 +1,12 @@
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
-const http = require('http');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Python connection settings - use environment variables for flexibility
-const PYTHON_HOST = process.env.PYTHON_HOST || 'oraclex-python-backend.railway.internal';
-const PYTHON_PORT = process.env.PYTHON_PORT || 8080;
+// Python backend URL - now public!
+const PYTHON_URL = process.env.PYTHON_URL || 'https://oraclex-python-backend-production.up.railway.app';
 
 app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
@@ -16,64 +14,46 @@ app.use(bodyParser.json({ limit: '50mb' }));
 // Simple in-memory storage
 let marketState = { symbols: {}, analysis: {}, timestamp: null };
 
-// Helper: Make HTTP request to Python backend
-function forwardToPython(path, method, data) {
-  return new Promise((resolve, reject) => {
-    console.log(`[HTTP Request] ${method} http://${PYTHON_HOST}:${PYTHON_PORT}${path}`);
+// Helper: Make HTTPS request to Python backend
+async function forwardToPython(path, method, data) {
+  try {
+    const url = `${PYTHON_URL}${path}`;
+    console.log(`[FETCH] ${method} ${url}`);
     
     const options = {
-      hostname: PYTHON_HOST,
-      port: PYTHON_PORT,
-      path: path,
       method: method,
       headers: {
-        'Content-Type': 'application/json',
-        'Connection': 'close'
+        'Content-Type': 'application/json'
       },
       timeout: 8000
     };
 
-    const req = http.request(options, (res) => {
-      let responseData = '';
-
-      res.on('data', (chunk) => {
-        responseData += chunk;
-      });
-
-      res.on('end', () => {
-        console.log(`[HTTP Response] Status: ${res.statusCode}`);
-        resolve({
-          status: res.statusCode,
-          data: responseData
-        });
-      });
-    });
-
-    req.on('error', (error) => {
-      console.error(`[HTTP Error] ${error.code} - ${error.message}`);
-      reject(error);
-    });
-
-    req.on('timeout', () => {
-      req.destroy();
-      console.error('[HTTP Error] Request timeout');
-      reject(new Error('Request timeout'));
-    });
-
     if (data) {
-      req.write(JSON.stringify(data));
+      options.body = JSON.stringify(data);
     }
-    req.end();
-  });
+
+    const response = await fetch(url, options);
+    const responseText = await response.text();
+    
+    console.log(`[RESPONSE] Status: ${response.status}`);
+    
+    return {
+      status: response.status,
+      data: responseText
+    };
+  } catch (error) {
+    console.error(`[FETCH ERROR] ${error.message}`);
+    throw error;
+  }
 }
 
 // ENDPOINTS
 app.get('/', (req, res) => {
   res.json({ 
     status: 'OK', 
-    relay: 'V2.4', 
+    relay: 'V2.5', 
     uptime: process.uptime(),
-    python_connection: `http://${PYTHON_HOST}:${PYTHON_PORT}`
+    python_url: PYTHON_URL
   });
 });
 
@@ -85,8 +65,7 @@ app.get('/status', (req, res) => {
     symbols: symbolCount,
     analysis: analysisCount,
     timestamp: marketState.timestamp,
-    python_host: PYTHON_HOST,
-    python_port: PYTHON_PORT
+    python_url: PYTHON_URL
   });
 });
 
@@ -110,7 +89,7 @@ app.post('/update-market-state', async (req, res) => {
 
     console.log(`✅ Relay stored ${market_data.length} symbols. Total: ${Object.keys(marketState.symbols).length}`);
 
-    // Forward to Python on Railway internal network
+    // Forward to Python
     console.log(`📤 Forwarding ${market_data.length} symbols to Python...`);
     
     try {
@@ -143,7 +122,7 @@ app.post('/update-market-state', async (req, res) => {
   }
 });
 
-// Get market state for dashboard (market data only)
+// Get market state for dashboard
 app.get('/get-market-state', (req, res) => {
   const symbols = Object.values(marketState.symbols);
   res.json({ 
@@ -201,16 +180,16 @@ app.get('/latest-analysis', async (req, res) => {
 
 // Start server
 console.log('\n' + '='.repeat(80));
-console.log('✨ ORACLEX RELAY V2.4 - IMPROVED CONNECTION');
+console.log('✨ ORACLEX RELAY V2.5 - PUBLIC PYTHON BACKEND');
 console.log('='.repeat(80));
 console.log(`🚀 Listening on port ${PORT}`);
-console.log(`📡 Python Backend: http://${PYTHON_HOST}:${PYTHON_PORT}`);
-console.log(`🔗 Connection Method: Node.js http module`);
+console.log(`📡 Python Backend: ${PYTHON_URL}`);
+console.log(`🔗 Connection Method: HTTPS fetch (public)`);
 console.log('='.repeat(80));
 console.log('\nFeatures:');
 console.log('  ✓ Receives market data from EA');
 console.log('  ✓ Stores market state');
-console.log('  ✓ Forwards to Python (internal Railway network)');
+console.log('  ✓ Forwards to Python (public HTTPS)');
 console.log('  ✓ Proxies analysis endpoints');
 console.log('  ✓ Returns combined data to Dashboard');
 console.log('='.repeat(80) + '\n');
