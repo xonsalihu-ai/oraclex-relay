@@ -1,421 +1,86 @@
-#!/usr/bin/env node
-
-/**
- * ORACLEX RELAY V2.0 - UPDATED FOR PYTHON INTEGRATION + V2.4 DASHBOARD
- * 
- * CHANGES IN THIS VERSION:
- * - Added Python backend forwarding in /update-market-state
- * - Relay receives from EA, stores locally, AND forwards to Python for analysis
- * - Python analyzes and can POST back via /market-analysis
- * - Dashboard reads complete data from Relay /get-market-state
- */
-
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
+const fetch = require('node-fetch');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
 app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
-app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 
-// State
-let marketState = {
-  market_data: [],
-  timestamp: null,
-  data_age_sec: 0
-};
+// Simple in-memory storage
+let marketState = { symbols: {}, timestamp: null };
 
-let commandQueue = [];
-let pendingApprovals = new Map();
-let activeTrades = [];
-let receipts = [];
-
-// Helpers
-function nowSec() {
-  return Math.floor(Date.now() / 1000);
-}
-
-function sendTelegramMessage(text) {
-  console.log(`📨 Telegram would send: ${text.substring(0, 50)}...`);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// GET ENDPOINTS
-// ═══════════════════════════════════════════════════════════════════════════
-
-// Health check
+// ENDPOINTS
 app.get('/', (req, res) => {
-  res.json({
-    status: 'OK',
-    name: 'OracleX Trading Relay',
-    version: '2.0',
-    uptime: process.uptime()
-  });
+  res.json({ status: 'OK', relay: 'V2.1', uptime: process.uptime() });
 });
 
-// Status endpoint
 app.get('/status', (req, res) => {
-  const dataAge = marketState.timestamp 
-    ? Math.floor((Date.now() - marketState.timestamp) / 1000)
-    : null;
-  
-  res.json({
-    status: 'running',
-    relay_active: true,
-    symbols_count: marketState.market_data?.length || 0,
-    trades_open: activeTrades.length,
-    pending_approvals: pendingApprovals.size,
-    queue_size: commandQueue.length,
-    last_update: marketState.timestamp,
-    data_age_sec: dataAge,
-    timestamp: new Date().toISOString()
-  });
+  const symbolCount = Object.keys(marketState.symbols).length;
+  res.json({ status: 'running', symbols: symbolCount, timestamp: marketState.timestamp });
 });
 
-// Get market state (for Dashboard)
-app.get('/get-market-state', (req, res) => {
-  const dataAge = marketState.timestamp 
-    ? Math.floor((Date.now() - marketState.timestamp) / 1000)
-    : 0;
-  
-  res.json({
-    ...marketState,
-    data_age_sec: dataAge
-  });
-});
-
-// Get pending approvals
-app.get('/pending-approvals', (req, res) => {
-  const items = Array.from(pendingApprovals.entries()).map(([cmdId, pending]) => ({
-    cmd_id: cmdId,
-    symbol: pending.signal?.symbol,
-    action: pending.signal?.action,
-    status: pending.status,
-    created_at: pending.created_at,
-    auto_approve_in_sec: Math.max(0, 30 - (nowSec() - pending.created_at))
-  }));
-  
-  res.json({
-    total: items.length,
-    items
-  });
-});
-
-// Get last signal for MT5
-app.get('/last-signal', (req, res) => {
-  if (commandQueue.length > 0) {
-    const cmd = commandQueue.shift();
-    console.log(`📤 TO MT5: ${cmd.symbol} ${cmd.action} lot=${cmd.lot}`);
-    res.json(cmd);
-  } else {
-    res.json({ action: 'NONE' });
-  }
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// POST ENDPOINTS
-// ═══════════════════════════════════════════════════════════════════════════
-
-// UPDATED: /update-market-state (from MQL5)
-// Now forwards to Python backend for analysis
+// Receive market data from EA
 app.post('/update-market-state', async (req, res) => {
   try {
     const { market_data } = req.body;
     
     if (!market_data || !Array.isArray(market_data)) {
-      return res.status(400).json({ error: 'Invalid market_data format' });
+      return res.json({ error: 'Invalid data' });
     }
 
-    if (!marketState.market_data) {
-      marketState.market_data = [];
-    }
-    
-    // Step 1: Store data in Relay (existing behavior)
-    market_data.forEach(newSymbol => {
-      const existingIndex = marketState.market_data.findIndex(
-        s => s.symbol === newSymbol.symbol
-      );
-      
-      if (existingIndex >= 0) {
-        // MERGE: Update existing symbol with new data
-        marketState.market_data[existingIndex] = {
-          ...marketState.market_data[existingIndex],
-          ...newSymbol,
-          indicators: newSymbol.indicators || marketState.market_data[existingIndex].indicators
-        };
-      } else {
-        marketState.market_data.push(newSymbol);
+    // Store in memory
+    for (const sym of market_data) {
+      const symbol = sym.symbol;
+      if (symbol) {
+        marketState.symbols[symbol] = sym;
       }
-    });
-
+    }
     marketState.timestamp = Date.now();
 
-    // Step 2: Forward to Python backend for analysis
-    const pythonUrl = process.env.PYTHON_BACKEND_URL || 
-                      'https://oraclex-python-backend.up.railway.app';
+    console.log(`✅ Relay stored ${market_data.length} symbols. Total: ${Object.keys(marketState.symbols).length}`);
+
+    // Forward to Python on internal Railway network
+    console.log(`📤 Forwarding to Python at: oraclex-python-backend.railway.internal`);
     
     try {
-      console.log(`📤 Forwarding ${market_data.length} symbols to Python backend...`);
-      
-      const pythonResponse = await fetch(`${pythonUrl}/market-data-v1.6`, {
+      const pythonResp = await fetch('http://oraclex-python-backend.railway.internal:8080/market-data-v1.6', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          server_time: Math.floor(Date.now() / 1000),
-          market_data: market_data
-        })
+        body: JSON.stringify({ server_time: Math.floor(Date.now() / 1000), market_data })
       });
-      
-      if (pythonResponse.ok) {
-        const pythonResult = await pythonResponse.json();
-        console.log(`✅ Python backend received: ${pythonResult.symbols || market_data.length} symbols`);
+
+      if (pythonResp.ok) {
+        const pythonData = await pythonResp.json();
+        console.log(`✅ Python accepted data`);
       } else {
-        console.warn(`⚠️  Python backend returned status ${pythonResponse.status}`);
+        console.warn(`⚠️ Python returned ${pythonResp.status}`);
       }
-    } catch (pythonError) {
-      console.warn(`⚠️  Could not reach Python backend: ${pythonError.message}`);
-      // Continue anyway - Relay still has the data stored
+    } catch (pythonErr) {
+      console.warn(`⚠️ Python unreachable: ${pythonErr.message}`);
     }
 
-    // Step 3: Respond to EA
-    const symbolCount = marketState.market_data.length;
-    if (symbolCount > 0) {
-      const firstSymbol = marketState.market_data[0];
-      const greenCount = Object.values(firstSymbol.indicators || {})
-        .filter(ind => ind && ind[0] === '🟢').length;
-      console.log(`✅ Market state merged: ${symbolCount} symbols | First: ${firstSymbol.symbol} (${greenCount} green)`);
-    }
-
-    res.json({
-      success: true,
-      message: 'Market state merged and forwarded to Python',
-      symbols_merged: symbolCount
-    });
+    res.json({ success: true, symbols_stored: market_data.length, total_symbols: Object.keys(marketState.symbols).length });
   } catch (error) {
-    console.error('❌ Error updating market state:', error.message);
+    console.error('Error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
-// LEGACY: /data-update (for backward compatibility)
-app.post('/data-update', (req, res) => {
-  try {
-    const { market_data } = req.body;
-    
-    if (market_data && Array.isArray(market_data)) {
-      marketState = {
-        market_data,
-        timestamp: Date.now(),
-        data_age_sec: 0
-      };
-    }
-    
-    res.json({ ok: true, message: 'Data received' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+// Get market state for dashboard
+app.get('/get-market-state', (req, res) => {
+  const symbols = Object.values(marketState.symbols);
+  res.json({ market_data: symbols, timestamp: marketState.timestamp });
 });
 
-// UPDATED: /market-analysis (from Python backend)
-// Receives analysis from Python and merges with market data
-app.post('/market-analysis', (req, res) => {
-  try {
-    const { market_data } = req.body;
-    
-    if (market_data && Array.isArray(market_data)) {
-      // Merge analysis data from Python with existing market state
-      market_data.forEach(sym => {
-        const existing = marketState.market_data?.find(m => m.symbol === sym.symbol);
-        if (existing) {
-          // Merge all analysis fields from Python
-          existing.confluence = sym.confluence || existing.confluence;
-          existing.confidence = sym.confidence ?? existing.confidence;
-          existing.interpretation = sym.interpretation || existing.interpretation;
-          
-          // Also support V2.4 dashboard features if Python sends them
-          existing.market_regime = sym.market_regime || existing.market_regime;
-          existing.bias_stability = sym.bias_stability || existing.bias_stability;
-          existing.confluence_breakdown = sym.confluence_breakdown || existing.confluence_breakdown;
-          existing.state_statistics = sym.state_statistics || existing.state_statistics;
-          existing.current_session = sym.current_session || existing.current_session;
-        }
-      });
-      
-      marketState.timestamp = Date.now();
-      
-      if (market_data.length > 0) {
-        const sym = market_data[0];
-        console.log(`📊 Analysis merged: ${sym.symbol} - Confluence: ${sym.confluence?.total_confluence || 'N/A'}% | Confidence: ${sym.confidence?.total_confidence || 'N/A'}%`);
-      }
-    }
-    
-    res.json({ ok: true, message: 'Analysis merged' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
+// Start server
+console.log('\n' + '='.repeat(80));
+console.log('✨ ORACLEX RELAY V2.1');
+console.log('='.repeat(80));
+console.log(`🚀 Listening on port ${PORT}`);
+console.log(`📡 Python: oraclex-python-backend.railway.internal (private)`);
+console.log('='.repeat(80) + '\n');
 
-// Submit signal for approval
-app.post('/submit-signal', (req, res) => {
-  try {
-    const signal = req.body;
-    
-    if (!signal.symbol || !signal.action) {
-      return res.status(400).json({ error: 'Missing symbol or action' });
-    }
-
-    const cmdId = signal.cmd_id || `OX_${Date.now()}`;
-    const greenCount = signal.green_count || 0;
-
-    console.log(`🚨 SIGNAL RECEIVED: ${signal.symbol} ${signal.action} (${greenCount}/7 green)`);
-
-    // Store as pending
-    pendingApprovals.set(cmdId, {
-      signal,
-      status: 'PENDING',
-      created_at: nowSec()
-    });
-
-    // Send Telegram (if configured)
-    const telegramMsg = `
-🚨 ${signal.symbol} ${signal.action}
-🤖 Confidence: ${signal.confidence || 0}%
-📊 ${greenCount}/7 indicators
-Entry: ${signal.entry?.toFixed(5)}
-SL: ${signal.sl?.toFixed(5)}
-TP: ${signal.tp?.toFixed(5)}
-    `.trim();
-    
-    sendTelegramMessage(telegramMsg);
-
-    res.json({
-      status: 'PENDING_APPROVAL',
-      cmd_id: cmdId,
-      auto_approve_in_sec: 30
-    });
-  } catch (error) {
-    console.error('❌ Error submitting signal:', error.message);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Approve signal manually
-app.post('/approve-signal', (req, res) => {
-  try {
-    const { cmd_id, lot } = req.body;
-    const pending = pendingApprovals.get(cmd_id);
-    
-    if (pending) {
-      pending.status = 'APPROVED';
-      
-      // Queue for MT5
-      const queueSignal = {
-        cmd_id,
-        symbol: pending.signal.symbol,
-        action: pending.signal.action,
-        lot: lot || pending.signal.lot || 0.1,
-        sl: pending.signal.sl,
-        tp: pending.signal.tp,
-        price: pending.signal.price
-      };
-      
-      commandQueue.push(queueSignal);
-      console.log(`✅ APPROVED: ${cmd_id} lot=${queueSignal.lot}`);
-    }
-    
-    res.json({ ok: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Execution receipt from MT5
-app.post('/execution-receipt', (req, res) => {
-  try {
-    const receipt = req.body;
-    receipts.push(receipt);
-    
-    if (receipt.cmd_id) {
-      pendingApprovals.delete(receipt.cmd_id);
-    }
-    
-    console.log(`🧾 EXECUTION: ${receipt.symbol} ${receipt.action} retcode=${receipt.retcode}`);
-    res.json({ ok: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Flush command queue
-app.post('/flush-queue', (req, res) => {
-  commandQueue = [];
-  res.json({ status: 'FLUSHED' });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// ERROR HANDLING
-// ═══════════════════════════════════════════════════════════════════════════
-
-app.use((err, req, res, next) => {
-  console.error('❌ Server error:', err.message);
-  res.status(500).json({ error: err.message });
-});
-
-// 404 handler
-app.use((req, res) => {
-  res.status(404).json({ error: 'Endpoint not found' });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// START SERVER
-// ═════════════════════════════════════════════════════════════════════════════
-
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`
-╔════════════════════════════════════════════════════════════════╗
-║        🚀 ORACLEX RELAY V2.0 - PRODUCTION READY 🚀           ║
-║              + PYTHON BACKEND INTEGRATION                      ║
-║                  + V2.4 DASHBOARD FEATURES                     ║
-╚════════════════════════════════════════════════════════════════╝
-
-✅ Server listening on port ${PORT}
-
-📡 ENDPOINTS:
-  GET  /                    → Health check
-  GET  /status              → System status
-  GET  /get-market-state    → Market data (for Dashboard)
-  GET  /pending-approvals   → Waiting signals
-  GET  /last-signal         → Next signal for MT5
-  
-  POST /update-market-state ← From MT5 EA (receives & forwards to Python)
-  POST /data-update         ← From MT5 (legacy)
-  POST /market-analysis     ← From Python (receives analysis)
-  POST /submit-signal       ← From Dashboard
-  POST /approve-signal      ← From Dashboard
-  POST /execution-receipt   ← From MT5
-
-🔗 DATA FLOW:
-  1. MT5 EA → POST /update-market-state
-  2. Relay stores data
-  3. Relay forwards to Python /market-data-v1.6
-  4. Python analyzes (confluence, confidence, interpretation)
-  5. Python POST /market-analysis (optional - sends analysis back)
-  6. Relay merges analysis with market data
-  7. Dashboard → GET /get-market-state (gets everything)
-
-⚙️  CONFIGURATION:
-  Environment variable: PYTHON_BACKEND_URL
-  (Default: https://oraclex-python-backend.up.railway.app)
-
-✅ System ready with Python backend integration!
-  `);
-});
-
-process.on('SIGINT', () => {
-  console.log('\n\n👋 Shutting down gracefully...');
-  process.exit(0);
-});
+app.listen(PORT, '0.0.0.0');
