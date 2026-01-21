@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
+const http = require('http');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -11,9 +12,57 @@ app.use(bodyParser.json({ limit: '50mb' }));
 // Simple in-memory storage
 let marketState = { symbols: {}, analysis: {}, timestamp: null };
 
+// Helper: Make HTTP request to Python backend
+function forwardToPython(path, method, data) {
+  return new Promise((resolve, reject) => {
+    const pythonHost = 'oraclex-python-backend.railway.internal';
+    const pythonPort = 8080;
+    
+    const options = {
+      hostname: pythonHost,
+      port: pythonPort,
+      path: path,
+      method: method,
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      timeout: 10000
+    };
+
+    const req = http.request(options, (res) => {
+      let responseData = '';
+
+      res.on('data', (chunk) => {
+        responseData += chunk;
+      });
+
+      res.on('end', () => {
+        resolve({
+          status: res.statusCode,
+          data: responseData
+        });
+      });
+    });
+
+    req.on('error', (error) => {
+      reject(error);
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('Request timeout'));
+    });
+
+    if (data) {
+      req.write(JSON.stringify(data));
+    }
+    req.end();
+  });
+}
+
 // ENDPOINTS
 app.get('/', (req, res) => {
-  res.json({ status: 'OK', relay: 'V2.2', uptime: process.uptime() });
+  res.json({ status: 'OK', relay: 'V2.3', uptime: process.uptime() });
 });
 
 app.get('/status', (req, res) => {
@@ -49,34 +98,27 @@ app.post('/update-market-state', async (req, res) => {
 
     // Forward to Python on Railway internal network
     console.log(`📤 Forwarding ${market_data.length} symbols to Python...`);
+    console.log(`   Target: http://oraclex-python-backend.railway.internal:8080/market-data-v1.6`);
     
     try {
-      // Use Railway internal network hostname
-      const pythonUrl = process.env.PYTHON_INTERNAL_URL || 'http://oraclex-python-backend.railway.internal:8080';
-      
-      console.log(`   Connecting to: ${pythonUrl}/market-data-v1.6`);
-      
-      const pythonResp = await fetch(`${pythonUrl}/market-data-v1.6`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
+      const pythonResponse = await forwardToPython(
+        '/market-data-v1.6',
+        'POST',
+        { 
           server_time: Math.floor(Date.now() / 1000), 
           market_data 
-        }),
-        timeout: 10000
-      });
+        }
+      );
 
-      console.log(`   Response status: ${pythonResp.status}`);
+      console.log(`   Response status: ${pythonResponse.status}`);
 
-      if (pythonResp.ok) {
-        const pythonData = await pythonResp.json();
-        console.log(`✅ Python accepted data - stored: ${pythonData.stored}`);
+      if (pythonResponse.status === 200) {
+        console.log(`✅ Python accepted data - Response: ${pythonResponse.data}`);
       } else {
-        console.warn(`⚠️ Python returned ${pythonResp.status}`);
+        console.warn(`⚠️ Python returned ${pythonResponse.status}`);
       }
     } catch (pythonErr) {
-      console.warn(`⚠️ Python connection error: ${pythonErr.message}`);
-      console.warn(`   Error type: ${pythonErr.name}`);
+      console.warn(`⚠️ Python forward error: ${pythonErr.message}`);
     }
 
     res.json({ 
@@ -105,17 +147,18 @@ app.get('/analysis/:symbol', async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
     
-    const pythonUrl = process.env.PYTHON_INTERNAL_URL || 'http://oraclex-python-backend.railway.internal:8080';
+    console.log(`📡 Proxying analysis request for ${symbol}`);
     
-    const pythonResp = await fetch(`${pythonUrl}/analysis/${symbol}`, {
-      timeout: 10000
-    });
+    const pythonResponse = await forwardToPython(
+      `/analysis/${symbol}`,
+      'GET'
+    );
     
-    if (pythonResp.ok) {
-      const analysis = await pythonResp.json();
+    if (pythonResponse.status === 200) {
+      const analysis = JSON.parse(pythonResponse.data);
       res.json(analysis);
     } else {
-      res.status(pythonResp.status).json({ error: 'Analysis not available' });
+      res.status(pythonResponse.status).json({ error: 'Analysis not available' });
     }
   } catch (error) {
     console.error(`Analysis proxy error for ${req.params.symbol}:`, error.message);
@@ -126,17 +169,18 @@ app.get('/analysis/:symbol', async (req, res) => {
 // Get all analysis
 app.get('/latest-analysis', async (req, res) => {
   try {
-    const pythonUrl = process.env.PYTHON_INTERNAL_URL || 'http://oraclex-python-backend.railway.internal:8080';
+    console.log(`📡 Proxying latest-analysis request`);
     
-    const pythonResp = await fetch(`${pythonUrl}/latest-analysis`, {
-      timeout: 15000
-    });
+    const pythonResponse = await forwardToPython(
+      '/latest-analysis',
+      'GET'
+    );
     
-    if (pythonResp.ok) {
-      const data = await pythonResp.json();
+    if (pythonResponse.status === 200) {
+      const data = JSON.parse(pythonResponse.data);
       res.json(data);
     } else {
-      res.status(pythonResp.status).json({ analyses: [] });
+      res.status(pythonResponse.status).json({ analyses: [] });
     }
   } catch (error) {
     console.error('Latest analysis proxy error:', error.message);
@@ -146,15 +190,16 @@ app.get('/latest-analysis', async (req, res) => {
 
 // Start server
 console.log('\n' + '='.repeat(80));
-console.log('✨ ORACLEX RELAY V2.2');
+console.log('✨ ORACLEX RELAY V2.3 - HTTP MODULE FIX');
 console.log('='.repeat(80));
 console.log(`🚀 Listening on port ${PORT}`);
-console.log(`📡 Python Backend URL: ${process.env.PYTHON_INTERNAL_URL || 'http://oraclex-python-backend.railway.internal:8080'}`);
+console.log(`📡 Python Backend: http://oraclex-python-backend.railway.internal:8080`);
+console.log(`🔗 Connection Method: Node.js http module (internal Railway network)`);
 console.log('='.repeat(80));
 console.log('\nFeatures:');
 console.log('  ✓ Receives market data from EA');
 console.log('  ✓ Stores market state');
-console.log('  ✓ Forwards to Python (internal Railway network)');
+console.log('  ✓ Forwards to Python (internal Railway network via http module)');
 console.log('  ✓ Proxies analysis endpoints');
 console.log('  ✓ Returns combined data to Dashboard');
 console.log('='.repeat(80) + '\n');
