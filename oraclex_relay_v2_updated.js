@@ -3,11 +3,11 @@
 /**
  * ORACLEX RELAY V2.0 - UPDATED FOR PYTHON INTEGRATION + V2.4 DASHBOARD
  * 
- * Based on proven working code
- * - Added V2.4 dashboard features to /market-analysis
- * - Keep backward compatibility with all endpoints
- * - Uses Express.js
- * - Runs on port 3000 (or $PORT env var)
+ * CHANGES IN THIS VERSION:
+ * - Added Python backend forwarding in /update-market-state
+ * - Relay receives from EA, stores locally, AND forwards to Python for analysis
+ * - Python analyzes and can POST back via /market-analysis
+ * - Dashboard reads complete data from Relay /get-market-state
  */
 
 const express = require('express');
@@ -120,8 +120,9 @@ app.get('/last-signal', (req, res) => {
 // POST ENDPOINTS
 // ═══════════════════════════════════════════════════════════════════════════
 
-// NEW ENDPOINT: /update-market-state (from MQL5)
-app.post('/update-market-state', (req, res) => {
+// UPDATED: /update-market-state (from MQL5)
+// Now forwards to Python backend for analysis
+app.post('/update-market-state', async (req, res) => {
   try {
     const { market_data } = req.body;
     
@@ -133,7 +134,7 @@ app.post('/update-market-state', (req, res) => {
       marketState.market_data = [];
     }
     
-    // Update only the symbols that are in this batch
+    // Step 1: Store data in Relay (existing behavior)
     market_data.forEach(newSymbol => {
       const existingIndex = marketState.market_data.findIndex(
         s => s.symbol === newSymbol.symbol
@@ -153,6 +154,34 @@ app.post('/update-market-state', (req, res) => {
 
     marketState.timestamp = Date.now();
 
+    // Step 2: Forward to Python backend for analysis
+    const pythonUrl = process.env.PYTHON_BACKEND_URL || 
+                      'https://oraclex-python-backend.up.railway.app';
+    
+    try {
+      console.log(`📤 Forwarding ${market_data.length} symbols to Python backend...`);
+      
+      const pythonResponse = await fetch(`${pythonUrl}/market-data-v1.6`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          server_time: Math.floor(Date.now() / 1000),
+          market_data: market_data
+        })
+      });
+      
+      if (pythonResponse.ok) {
+        const pythonResult = await pythonResponse.json();
+        console.log(`✅ Python backend received: ${pythonResult.symbols || market_data.length} symbols`);
+      } else {
+        console.warn(`⚠️  Python backend returned status ${pythonResponse.status}`);
+      }
+    } catch (pythonError) {
+      console.warn(`⚠️  Could not reach Python backend: ${pythonError.message}`);
+      // Continue anyway - Relay still has the data stored
+    }
+
+    // Step 3: Respond to EA
     const symbolCount = marketState.market_data.length;
     if (symbolCount > 0) {
       const firstSymbol = marketState.market_data[0];
@@ -163,7 +192,7 @@ app.post('/update-market-state', (req, res) => {
 
     res.json({
       success: true,
-      message: 'Market state merged',
+      message: 'Market state merged and forwarded to Python',
       symbols_merged: symbolCount
     });
   } catch (error) {
@@ -191,33 +220,28 @@ app.post('/data-update', (req, res) => {
   }
 });
 
-// UPDATED: /market-analysis (with V2.4 dashboard features)
+// UPDATED: /market-analysis (from Python backend)
+// Receives analysis from Python and merges with market data
 app.post('/market-analysis', (req, res) => {
   try {
     const { market_data } = req.body;
     
     if (market_data && Array.isArray(market_data)) {
-      // Merge with existing data
+      // Merge analysis data from Python with existing market state
       market_data.forEach(sym => {
         const existing = marketState.market_data?.find(m => m.symbol === sym.symbol);
         if (existing) {
-          // Merge analysis data
-          existing.indicators = sym.indicators || existing.indicators;
-          existing.bias = sym.bias || existing.bias;
-          existing.insight = sym.insight || existing.insight;
-          existing.strategies = sym.strategies || existing.strategies;
+          // Merge all analysis fields from Python
           existing.confluence = sym.confluence || existing.confluence;
-          existing.green_count = sym.green_count ?? existing.green_count;
+          existing.confidence = sym.confidence ?? existing.confidence;
+          existing.interpretation = sym.interpretation || existing.interpretation;
           
-          // NEW V2.4 Dashboard Features
+          // Also support V2.4 dashboard features if Python sends them
           existing.market_regime = sym.market_regime || existing.market_regime;
           existing.bias_stability = sym.bias_stability || existing.bias_stability;
           existing.confluence_breakdown = sym.confluence_breakdown || existing.confluence_breakdown;
-          existing.context_history = sym.context_history || existing.context_history;
           existing.state_statistics = sym.state_statistics || existing.state_statistics;
           existing.current_session = sym.current_session || existing.current_session;
-          existing.session_intelligence = sym.session_intelligence || existing.session_intelligence;
-          existing.confidence = sym.confidence ?? existing.confidence;
         }
       });
       
@@ -225,13 +249,11 @@ app.post('/market-analysis', (req, res) => {
       
       if (market_data.length > 0) {
         const sym = market_data[0];
-        const greenCount = Object.values(sym.indicators || {})
-          .filter(ind => ind && ind[0] === '🟢').length;
-        console.log(`📊 Analysis: ${sym.symbol} - ${greenCount}/${Object.keys(sym.indicators || {}).length} indicators | Regime: ${sym.market_regime?.trend || 'Unknown'}`);
+        console.log(`📊 Analysis merged: ${sym.symbol} - Confluence: ${sym.confluence?.total_confluence || 'N/A'}% | Confidence: ${sym.confidence?.total_confidence || 'N/A'}%`);
       }
     }
     
-    res.json({ ok: true });
+    res.json({ ok: true, message: 'Analysis merged' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -350,13 +372,14 @@ app.use((req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // START SERVER
-// ═══════════════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════════════════
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`
 ╔════════════════════════════════════════════════════════════════╗
 ║        🚀 ORACLEX RELAY V2.0 - PRODUCTION READY 🚀           ║
-║                    + V2.4 DASHBOARD FEATURES                  ║
+║              + PYTHON BACKEND INTEGRATION                      ║
+║                  + V2.4 DASHBOARD FEATURES                     ║
 ╚════════════════════════════════════════════════════════════════╝
 
 ✅ Server listening on port ${PORT}
@@ -368,19 +391,27 @@ app.listen(PORT, '0.0.0.0', () => {
   GET  /pending-approvals   → Waiting signals
   GET  /last-signal         → Next signal for MT5
   
-  POST /update-market-state ← MQL5 sends here
-  POST /data-update         ← MT5 sends here (legacy)
-  POST /market-analysis     ← Python sends analysis + V2.4 features
-  POST /submit-signal       ← Trade signals
-  POST /approve-signal      ← Manual approval
-  POST /execution-receipt   ← MT5 confirmations
+  POST /update-market-state ← From MT5 EA (receives & forwards to Python)
+  POST /data-update         ← From MT5 (legacy)
+  POST /market-analysis     ← From Python (receives analysis)
+  POST /submit-signal       ← From Dashboard
+  POST /approve-signal      ← From Dashboard
+  POST /execution-receipt   ← From MT5
 
-🔗 CONNECTION FLOW:
-  MQL5 → /update-market-state (price data)
-  Python → /market-analysis (analysis + dashboard features)
-  Dashboard → /get-market-state (complete data)
+🔗 DATA FLOW:
+  1. MT5 EA → POST /update-market-state
+  2. Relay stores data
+  3. Relay forwards to Python /market-data-v1.6
+  4. Python analyzes (confluence, confidence, interpretation)
+  5. Python POST /market-analysis (optional - sends analysis back)
+  6. Relay merges analysis with market data
+  7. Dashboard → GET /get-market-state (gets everything)
 
-✅ System ready with V2.4 dashboard features!
+⚙️  CONFIGURATION:
+  Environment variable: PYTHON_BACKEND_URL
+  (Default: https://oraclex-python-backend.up.railway.app)
+
+✅ System ready with Python backend integration!
   `);
 });
 
