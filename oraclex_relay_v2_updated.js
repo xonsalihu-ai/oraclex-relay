@@ -6,6 +6,10 @@ const http = require('http');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Python connection settings - use environment variables for flexibility
+const PYTHON_HOST = process.env.PYTHON_HOST || 'oraclex-python-backend.railway.internal';
+const PYTHON_PORT = process.env.PYTHON_PORT || 8080;
+
 app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
 
@@ -15,18 +19,18 @@ let marketState = { symbols: {}, analysis: {}, timestamp: null };
 // Helper: Make HTTP request to Python backend
 function forwardToPython(path, method, data) {
   return new Promise((resolve, reject) => {
-    const pythonHost = 'oraclex-python-backend.railway.internal';
-    const pythonPort = 8080;
+    console.log(`[HTTP Request] ${method} http://${PYTHON_HOST}:${PYTHON_PORT}${path}`);
     
     const options = {
-      hostname: pythonHost,
-      port: pythonPort,
+      hostname: PYTHON_HOST,
+      port: PYTHON_PORT,
       path: path,
       method: method,
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'Connection': 'close'
       },
-      timeout: 10000
+      timeout: 8000
     };
 
     const req = http.request(options, (res) => {
@@ -37,6 +41,7 @@ function forwardToPython(path, method, data) {
       });
 
       res.on('end', () => {
+        console.log(`[HTTP Response] Status: ${res.statusCode}`);
         resolve({
           status: res.statusCode,
           data: responseData
@@ -45,11 +50,13 @@ function forwardToPython(path, method, data) {
     });
 
     req.on('error', (error) => {
+      console.error(`[HTTP Error] ${error.code} - ${error.message}`);
       reject(error);
     });
 
     req.on('timeout', () => {
       req.destroy();
+      console.error('[HTTP Error] Request timeout');
       reject(new Error('Request timeout'));
     });
 
@@ -62,7 +69,12 @@ function forwardToPython(path, method, data) {
 
 // ENDPOINTS
 app.get('/', (req, res) => {
-  res.json({ status: 'OK', relay: 'V2.3', uptime: process.uptime() });
+  res.json({ 
+    status: 'OK', 
+    relay: 'V2.4', 
+    uptime: process.uptime(),
+    python_connection: `http://${PYTHON_HOST}:${PYTHON_PORT}`
+  });
 });
 
 app.get('/status', (req, res) => {
@@ -72,7 +84,9 @@ app.get('/status', (req, res) => {
     status: 'running', 
     symbols: symbolCount,
     analysis: analysisCount,
-    timestamp: marketState.timestamp 
+    timestamp: marketState.timestamp,
+    python_host: PYTHON_HOST,
+    python_port: PYTHON_PORT
   });
 });
 
@@ -98,7 +112,6 @@ app.post('/update-market-state', async (req, res) => {
 
     // Forward to Python on Railway internal network
     console.log(`📤 Forwarding ${market_data.length} symbols to Python...`);
-    console.log(`   Target: http://oraclex-python-backend.railway.internal:8080/market-data-v1.6`);
     
     try {
       const pythonResponse = await forwardToPython(
@@ -110,10 +123,8 @@ app.post('/update-market-state', async (req, res) => {
         }
       );
 
-      console.log(`   Response status: ${pythonResponse.status}`);
-
       if (pythonResponse.status === 200) {
-        console.log(`✅ Python accepted data - Response: ${pythonResponse.data}`);
+        console.log(`✅ Python accepted data`);
       } else {
         console.warn(`⚠️ Python returned ${pythonResponse.status}`);
       }
@@ -147,7 +158,7 @@ app.get('/analysis/:symbol', async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
     
-    console.log(`📡 Proxying analysis request for ${symbol}`);
+    console.log(`📡 Proxying analysis for ${symbol}`);
     
     const pythonResponse = await forwardToPython(
       `/analysis/${symbol}`,
@@ -169,7 +180,7 @@ app.get('/analysis/:symbol', async (req, res) => {
 // Get all analysis
 app.get('/latest-analysis', async (req, res) => {
   try {
-    console.log(`📡 Proxying latest-analysis request`);
+    console.log(`📡 Proxying latest-analysis`);
     
     const pythonResponse = await forwardToPython(
       '/latest-analysis',
@@ -190,16 +201,16 @@ app.get('/latest-analysis', async (req, res) => {
 
 // Start server
 console.log('\n' + '='.repeat(80));
-console.log('✨ ORACLEX RELAY V2.3 - HTTP MODULE FIX');
+console.log('✨ ORACLEX RELAY V2.4 - IMPROVED CONNECTION');
 console.log('='.repeat(80));
 console.log(`🚀 Listening on port ${PORT}`);
-console.log(`📡 Python Backend: http://oraclex-python-backend.railway.internal:8080`);
-console.log(`🔗 Connection Method: Node.js http module (internal Railway network)`);
+console.log(`📡 Python Backend: http://${PYTHON_HOST}:${PYTHON_PORT}`);
+console.log(`🔗 Connection Method: Node.js http module`);
 console.log('='.repeat(80));
 console.log('\nFeatures:');
 console.log('  ✓ Receives market data from EA');
 console.log('  ✓ Stores market state');
-console.log('  ✓ Forwards to Python (internal Railway network via http module)');
+console.log('  ✓ Forwards to Python (internal Railway network)');
 console.log('  ✓ Proxies analysis endpoints');
 console.log('  ✓ Returns combined data to Dashboard');
 console.log('='.repeat(80) + '\n');
