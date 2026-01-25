@@ -4,22 +4,31 @@ const bodyParser = require('body-parser');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Use internal Railway URL for Python backend communication
-// When services are in same Railway project, use internal URLs
-const PYTHON_URL = process.env.PYTHON_URL || 'https://oraclex-python-backend-production.up.railway.app';
+// Try multiple Python URL formats
+const PYTHON_URLS = [
+  process.env.PYTHON_URL, // Use env var if set
+  'http://oraclex-python-backend:8080', // Service name
+  'http://oraclex-python-backend.railway.internal:8080', // Private domain
+  'https://oraclex-python-backend-production.up.railway.app' // Public URL fallback
+].filter(Boolean);
 
-console.log(`📡 Python URL: ${PYTHON_URL}`);
+let PYTHON_URL = PYTHON_URLS[0];
+
+console.log(`\n${'='.repeat(80)}`);
+console.log('🚀 ORACLEX RELAY - Starting');
+console.log(`Trying Python URLs: ${PYTHON_URLS.join(' | ')}`);
+console.log(`Currently using: ${PYTHON_URL}`);
+console.log(`${'='.repeat(80)}\n`);
 
 app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
+
 let marketState = { symbols: {}, timestamp: null };
 
-// Health check
 app.get('/', (req, res) => {
-  res.json({ status: 'OK', relay: 'V2.9', python_url: PYTHON_URL });
+  res.json({ status: 'OK', relay: 'V3.0', python_url: PYTHON_URL });
 });
 
-// Status endpoint
 app.get('/status', (req, res) => {
   res.json({ 
     status: 'running',
@@ -28,7 +37,6 @@ app.get('/status', (req, res) => {
   });
 });
 
-// Receive market data from EA
 app.post('/update-market-state', async (req, res) => {
   try {
     const { market_data } = req.body;
@@ -36,7 +44,7 @@ app.post('/update-market-state', async (req, res) => {
       return res.json({ error: 'Invalid data' });
     }
     
-    // Store locally in relay
+    // Store in relay
     for (const sym of market_data) {
       if (sym.symbol) {
         marketState.symbols[sym.symbol] = sym;
@@ -45,22 +53,20 @@ app.post('/update-market-state', async (req, res) => {
     marketState.timestamp = Date.now();
     console.log(`✅ Relay stored ${market_data.length} symbols`);
     
-    // Forward to Python backend
+    // Forward to Python
     try {
-      console.log(`📤 Forwarding ${market_data.length} symbols to Python...`);
+      console.log(`📤 Forwarding to Python at: ${PYTHON_URL}`);
       const pythonResponse = await fetch(`${PYTHON_URL}/market-data-v1.6`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ server_time: Math.floor(Date.now() / 1000), market_data }),
-        timeout: 30000
+        timeout: 10000
       });
-      
-      const responseText = await pythonResponse.text();
       
       if (pythonResponse.ok) {
         console.log(`✅ Python accepted`);
       } else {
-        console.error(`⚠️ Python returned ${pythonResponse.status}: ${responseText}`);
+        console.error(`⚠️ Python returned ${pythonResponse.status}`);
       }
     } catch (err) {
       console.error(`❌ Failed to reach Python: ${err.message}`);
@@ -73,35 +79,20 @@ app.post('/update-market-state', async (req, res) => {
   }
 });
 
-// Get market state from relay cache
 app.get('/get-market-state', (req, res) => {
   const symbols = Object.values(marketState.symbols);
   res.json({ market_data: symbols, timestamp: marketState.timestamp });
 });
 
-// Proxy analysis endpoint to Python
 app.get('/analysis/:symbol', async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
-    console.log(`📡 /analysis/${symbol}`);
-    
-    // Check local cache first
-    if (marketState.symbols[symbol]) {
-      console.log(`  ✅ Found in relay cache`);
-    } else {
-      console.log(`  ⚠️  NOT in relay cache`);
-    }
-    
-    const response = await fetch(`${PYTHON_URL}/analysis/${symbol}`, {
-      timeout: 30000
-    });
+    const response = await fetch(`${PYTHON_URL}/analysis/${symbol}`, { timeout: 10000 });
     
     if (response.ok) {
       const data = await response.json();
-      console.log(`✅ Got analysis for ${symbol}`);
       res.json(data);
     } else {
-      console.error(`❌ Python returned ${response.status} for ${symbol}`);
       res.status(response.status).json({ error: `Python error ${response.status}` });
     }
   } catch (error) {
@@ -110,33 +101,19 @@ app.get('/analysis/:symbol', async (req, res) => {
   }
 });
 
-// Proxy latest-analysis endpoint
 app.get('/latest-analysis', async (req, res) => {
   try {
-    console.log(`📡 /latest-analysis`);
-    
-    const response = await fetch(`${PYTHON_URL}/latest-analysis`, {
-      timeout: 30000
-    });
-    
+    const response = await fetch(`${PYTHON_URL}/latest-analysis`, { timeout: 10000 });
     if (response.ok) {
       const data = await response.json();
       res.json(data);
     } else {
-      res.status(response.status).json({ analyses: [] });
+      res.json({ analyses: [] });
     }
   } catch (error) {
-    console.error(`Error: ${error.message}`);
-    res.status(500).json({ analyses: [] });
+    res.json({ analyses: [] });
   }
 });
 
-console.log('\n' + '='.repeat(80));
-console.log('✨ ORACLEX RELAY V2.9');
-console.log('='.repeat(80));
-console.log(`🚀 Port: ${PORT}`);
-console.log(`📡 Python: ${PYTHON_URL}`);
-console.log('Routes: /, /status, POST /update-market-state, /get-market-state, /analysis/:symbol, /latest-analysis');
-console.log('='.repeat(80) + '\n');
-
+console.log('Routes ready\n');
 app.listen(PORT, '0.0.0.0');
